@@ -4,9 +4,52 @@ from datetime import datetime
 import logging
 from pathlib import Path
 
+# Constants
+CATEGORY_EXTENSIONS = {
+    'Documents': ['.pdf', '.docx', '.txt', '.doc', '.rtf', '.odt', '.xlsx', '.xls', '.pptx', '.ppt', '.csv'],
+    'Images': ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.svg', '.webp'],
+    'Audio': ['.mp3', '.wav', '.aac', '.flac', '.ogg', '.m4a'],
+    'Video': ['.mp4', '.avi', '.mkv', '.mov', '.wmv', '.flv', '.webm'],
+    'Archives': ['.zip', '.rar', '.7z', '.tar', '.gz', '.bz2'],
+    'Code': ['.py', '.java', '.html', '.css', '.js', '.php', '.c', '.cpp', '.h', '.rb', '.json', '.xml'],
+    'Executables': ['.exe', '.msi', '.app', '.dmg', '.deb', '.rpm'],
+}
+OLD_FILES_AGE_DAYS = 30
+
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+def create_directory(path):
+    """Create directory if it doesn't exist."""
+    if not path.exists():
+        path.mkdir()
+        logger.info(f"Created directory: {path}")
+
+def move_file(source, destination):
+    """Safely move a file to the destination, handling duplicates."""
+    if destination.exists():
+        destination = handle_duplicates(destination)
+    
+    try:
+        shutil.move(str(source), str(destination))
+        logger.info(f"Moved {source.name} to {destination}")
+    except Exception as e:
+        logger.error(f"Error moving {source.name}: {e}")
+
+def handle_duplicates(destination):
+    """Handle duplicate filenames by appending a counter."""
+    base_name = destination.stem
+    extension = destination.suffix
+    parent_dir = destination.parent
+    counter = 1
+    
+    while True:
+        new_name = f"{base_name}_{counter}{extension}"
+        new_destination = parent_dir / new_name
+        if not new_destination.exists():
+            return new_destination
+        counter += 1
 
 def organize_downloads(downloads_path=None):
     """
@@ -15,111 +58,76 @@ def organize_downloads(downloads_path=None):
     Args:
         downloads_path: Path to the downloads folder. If None, uses the default user Downloads folder.
     """
-    # If no path is provided, use the default Downloads folder
-    if downloads_path is None:
-        downloads_path = os.path.join(os.path.expanduser('~'), 'Downloads')
+    downloads_path = get_downloads_path(downloads_path)
     
-    downloads_path = Path(downloads_path)
-    
-    # Ensure the downloads path exists
     if not downloads_path.exists():
         logger.error(f"The path {downloads_path} does not exist!")
         return
-    
+
     logger.info(f"Organizing files in {downloads_path}")
     
-    # Define category mappings
-    category_extensions = {
-        'Documents': ['.pdf', '.docx', '.txt', '.doc', '.rtf', '.odt', '.xlsx', '.xls', '.pptx', '.ppt', '.csv'],
-        'Images': ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.svg', '.webp'],
-        'Audio': ['.mp3', '.wav', '.aac', '.flac', '.ogg', '.m4a'],
-        'Video': ['.mp4', '.avi', '.mkv', '.mov', '.wmv', '.flv', '.webm'],
-        'Archives': ['.zip', '.rar', '.7z', '.tar', '.gz', '.bz2'],
-        'Code': ['.py', '.java', '.html', '.css', '.js', '.php', '.c', '.cpp', '.h', '.rb', '.json', '.xml'],
-        'Executables': ['.exe', '.msi', '.app', '.dmg', '.deb', '.rpm'],
-    }
+    create_category_directories(downloads_path)
     
-    # Create destination directories if they don't exist
-    for category in category_extensions:
-        category_path = downloads_path / category
-        if not category_path.exists():
-            category_path.mkdir()
-            logger.info(f"Created directory: {category_path}")
+    moved_count, skipped_count = process_files(downloads_path)
     
-    # Create an "Others" directory for uncategorized files
-    others_path = downloads_path / "Others"
-    if not others_path.exists():
-        others_path.mkdir()
-        logger.info(f"Created directory: {others_path}")
-    
-    # Create a directory for old files (older than 30 days)
-    old_files_path = downloads_path / "Old Files"
-    if not old_files_path.exists():
-        old_files_path.mkdir()
-        logger.info(f"Created directory: {old_files_path}")
-    
-    # Process each file in the downloads directory
+    logger.info(f"Organization complete: {moved_count} files moved, {skipped_count} files skipped.")
+
+def get_downloads_path(downloads_path):
+    """Return the downloads path, using the default if None."""
+    if downloads_path is None:
+        downloads_path = os.path.join(os.path.expanduser('~'), 'Downloads')
+    return Path(downloads_path)
+
+def create_category_directories(downloads_path):
+    """Create necessary directories for file categorization."""
+    for category in CATEGORY_EXTENSIONS:
+        create_directory(downloads_path / category)
+    create_directory(downloads_path / "Others")
+    create_directory(downloads_path / "Old Files")
+
+def process_files(downloads_path):
+    """Process files in the downloads directory and move them to appropriate categories."""
     moved_count = 0
     skipped_count = 0
     today = datetime.now()
     
     for item in downloads_path.iterdir():
-        # Skip directories and the script itself
         if item.is_dir() or item.name == os.path.basename(__file__):
+            skipped_count += 1
             continue
         
-        # Get file extension (lowercase)
-        file_ext = item.suffix.lower()
-        
-        # Check if file is older than 30 days
-        file_age_days = (today - datetime.fromtimestamp(item.stat().st_mtime)).days
-        if file_age_days > 30:
-            destination = old_files_path / item.name
-            move_file(item, destination)
+        if is_old_file(item, today):
+            move_file(item, downloads_path / "Old Files" / item.name)
             moved_count += 1
             continue
         
-        # Find the appropriate category for the file
-        found_category = False
-        for category, extensions in category_extensions.items():
-            if file_ext in extensions:
-                destination = downloads_path / category / item.name
-                move_file(item, destination)
-                moved_count += 1
-                found_category = True
-                break
+        found_category = move_file_to_category(item, downloads_path)
         
-        # If no category found, move to Others
         if not found_category:
-            destination = others_path / item.name
-            move_file(item, destination)
+            move_file(item, downloads_path / "Others" / item.name)
             moved_count += 1
     
-    logger.info(f"Organization complete: {moved_count} files moved, {skipped_count} files skipped.")
+    return moved_count, skipped_count
 
-def move_file(source, destination):
-    """Safely move a file to the destination, handling duplicates."""
-    # If the destination file already exists, append a number to the filename
-    if destination.exists():
-        base_name = destination.stem
-        extension = destination.suffix
-        parent_dir = destination.parent
-        counter = 1
-        
-        while True:
-            new_name = f"{base_name}_{counter}{extension}"
-            new_destination = parent_dir / new_name
-            if not new_destination.exists():
-                destination = new_destination
-                break
-            counter += 1
+def is_old_file(item, today):
+    """Check if the file is older than the defined threshold."""
+    file_age_days = (today - datetime.fromtimestamp(item.stat().st_mtime)).days
+    return file_age_days > OLD_FILES_AGE_DAYS
+
+def move_file_to_category(item, downloads_path):
+    """Move file to its appropriate category based on extension."""
+    file_ext = item.suffix.lower()
     
-    try:
-        shutil.move(str(source), str(destination))
-        logger.info(f"Moved {source.name} to {destination}")
-    except Exception as e:
-        logger.error(f"Error moving {source.name}: {e}")
+    for category, extensions in CATEGORY_EXTENSIONS.items():
+        if file_ext in extensions:
+            move_file(item, downloads_path / category / item.name)
+            return True
+    return False
+
+def main():
+    """Main function to organize downloads folder."""
+    organize_downloads()
 
 if __name__ == "__main__":
-    organize_downloads()
+    main()
     print("Downloads folder has been organized!")
